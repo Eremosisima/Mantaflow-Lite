@@ -32,6 +32,11 @@ exactamente las mismas gotas, así la paridad se mantiene.
 
 ![rain](media/rain_sphere.gif)
 
+Clip completo de la misma escena a 1024×1024 (300 frames @ 30 fps, backend GPU
++ Jacobi, 900 pasos): **[media/rain_sphere_1024.mp4](media/rain_sphere_1024.mp4)**
+— nube de lluvia, el arco emergiendo, la cortina envolviendo la esfera y la
+inundación final con la silueta ya revelada.
+
 ## Por qué existe este proyecto
 
 Se analizó [Mantaflow](https://github.com/tum-pbs/mantaflow) (Apache 2.0) como
