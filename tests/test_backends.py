@@ -138,7 +138,7 @@ def test_lluvia_sobre_esfera(name):
     if name == "gpu":
         _skip_no_cuda()
     from mantaflow_lite.sim import build_fluid
-    cfg = SimConfig(res=64, steps=90, dt=0.1, obstacle="sphere", rain=True,
+    cfg = SimConfig(res=64, steps=140, dt=0.1, obstacle="sphere", rain=True,
                     obstacle_y=0.5)
     b = _run(name, cfg)
     d = b.density()
@@ -162,3 +162,15 @@ def test_misma_lluvia_todos_backends():
     spots2 = [tuple(rain_spots(cfg, s)) for s in range(12)]
     assert spots == spots2
     assert any(spots), "la lluvia nunca gotio"
+
+
+def test_gotas_traseras_nacen_bajo_la_esfera():
+    """Algunas gotas nacen bajo la esfera (pasaron por detrás) para cerrar su arco."""
+    cfg = SimConfig(res=64, obstacle="sphere", rain=True, rain_seed=7)
+    puntos = [(x, y) for s in range(40) for x, y in rain_spots(cfg, s)]
+    traseras = [(x, y) for x, y in puntos if y < 1.0]
+    assert traseras, "ninguna gota nace bajo la esfera"
+    rad = cfg.obstacle_radius
+    for x, y in traseras:
+        assert abs(x - cfg.obstacle_x) < rad, f"gota trasera fuera de la silueta: x={x:.3f}"
+        assert y < cfg.obstacle_y - rad, f"gota trasera dentro de la esfera: y={y:.3f}"

@@ -75,11 +75,12 @@ class TricksBackend:
         cfg, r = self.cfg, self.cfg.res
         half = cfg.pour_width // 2
         if cfg.rain:
-            for x in rain_spots(cfg, self.t):
+            for x, y in rain_spots(cfg, self.t):
                 cx = int(x * r)
                 lo, hi = max(0, cx - half), min(r, cx + half + 1)
-                self.d[r - 1, lo:hi] = 1.0
-                self.v[r - 1, lo:hi] = -cfg.pour_speed
+                j = min(r - 1, max(1, int(y * (r - 1))))
+                self.d[j, lo:hi] = 1.0
+                self.v[j, lo:hi] = -cfg.pour_speed
         else:
             cx = int(cfg.pour_x * r)
             lo, hi = max(0, cx - half), min(r, cx + half + 1)

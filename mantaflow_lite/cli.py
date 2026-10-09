@@ -33,9 +33,12 @@ def build_parser():
     p.add_argument("--obstacle-x", type=float, default=0.5, help="centro horizontal de la esfera")
     p.add_argument("--obstacle-y", type=float, default=0.45, help="centro vertical de la esfera (0=piso)")
     p.add_argument("--obstacle-radius", type=float, default=0.18, help="radio de la esfera (fraccion de res)")
-    p.add_argument("--rain-every", type=int, default=4, help="pasos entre lluvias")
-    p.add_argument("--rain-drops", type=int, default=3, help="gotas por lluvia")
+    p.add_argument("--rain-every", type=int, default=4, help="intervalo medio entre gotas")
+    p.add_argument("--rain-drops", type=int, default=3, help="ranuras de gotas (se escalonan entre si)")
     p.add_argument("--rain-seed", type=int, default=7, help="semilla de la lluvia")
+    p.add_argument("--rain-spread", type=float, default=None,
+                   help="semi-ancho de la banda de gotas alrededor de la esfera "
+                        "(por defecto 2x radio; 0 = ancho completo)")
     return p
 
 
@@ -62,6 +65,8 @@ def main(argv=None):
         rain_every=args.rain_every,
         rain_drops=args.rain_drops,
         rain_seed=args.rain_seed,
+        rain_spread=(args.rain_spread if args.rain_spread is not None
+                     else (2.0 * args.obstacle_radius if args.scene == "rain" else 0.0)),
     )
     backend = create_backend(args.backend, cfg)
     os.makedirs(args.out, exist_ok=True)

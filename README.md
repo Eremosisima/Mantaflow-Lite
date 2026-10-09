@@ -19,23 +19,29 @@ del chorro + splash (pasos 0–320). Frame final a paso 400:*
 ### Escena 2: lluvia sobre una esfera invisible
 
 ```bash
-python -m mantaflow_lite --backend gpu --solver cg --scene rain --res 256 --steps 600 --save-every 50
+python -m mantaflow_lite --backend gpu --solver jacobi --jacobi-iters 16 --scene rain \
+  --res 512 --steps 900 --save-every 3 --rain-every 3 --rain-drops 4 \
+  --pour-width 2 --pour-speed 16 --obstacle-y 0.67 --gravity 12
 ```
 
-Gotas de líquido fluorescente cayendo sobre una esfera que **no se dibuja**: el
-contorno solo se revela porque el líquido se acumula y desliza sobre su
-superficie. El obstáculo entra en la simulación como máscara de celdas sólidas
-que **enmascara el Laplaciano** (cara cerrada = vecino excluido de la diagonal y
-del spmv), el gradiente (sin corrección a través del sólido) y la densidad
-(0 dentro). La lluvia es determinista (`rain_seed`): los tres backends ven
-exactamente las mismas gotas, así la paridad se mantiene.
+Gotas **aleatorias escalonadas** (cada ranura de gota tiene su propia fase: no
+hay ráfagas sincronadas) caen en una banda alrededor de la esfera
+(`--rain-spread`, por defecto 2× radio), y ~40% de las gotas nace **debajo de
+la esfera**: son las que "pasaron por detrás" — al caer cierran su arco
+inferior, así la esfera se lee como volumen con profundidad y no como una
+columna. La esfera no se dibuja: su contorno aparece porque el líquido se
+acumula y desliza sobre una máscara de celdas sólidas que **enmascara el
+Laplaciano** (cara cerrada = vecino excluido de la diagonal y del spmv), el
+gradiente (sin corrección a través del sólido) y la densidad (0 dentro). La
+lluvia es determinista (`rain_seed`): los tres backends ven exactamente las
+mismas gotas, así la paridad se mantiene.
 
 ![rain](media/rain_sphere.gif)
 
 Clip completo de la misma escena a 1024×1024 (300 frames @ 30 fps, backend GPU
-+ Jacobi, 900 pasos): **[media/rain_sphere_1024.mp4](media/rain_sphere_1024.mp4)**
-— nube de lluvia, el arco emergiendo, la cortina envolviendo la esfera y la
-inundación final con la silueta ya revelada.
++ Jacobi-16, 900 pasos): **[media/rain_sphere_1024.mp4](media/rain_sphere_1024.mp4)**
+— gotas cayendo alrededor de la esfera, el contorno cerrándose con la lluvia
+trasera y la inundación final con la silueta completa revelada.
 
 ## Por qué existe este proyecto
 
