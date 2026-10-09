@@ -26,8 +26,16 @@ def build_parser():
     p.add_argument("--cg-tol", type=float, default=1e-3, help="tolerancia CG (cpu/gpu-cg)")
     p.add_argument("--gravity", type=float, default=8.0)
     p.add_argument("--pour-x", type=float, default=0.5, help="posicion horizontal del vertido [0,1]")
-    p.add_argument("--pour-width", type=int, default=3, help="ancho del chorro en celdas")
+    p.add_argument("--pour-width", type=int, default=3, help="ancho del chorro/gota en celdas")
     p.add_argument("--pour-speed", type=float, default=8.0, help="velocidad inicial del vertido")
+    p.add_argument("--scene", choices=["default", "rain"], default="default",
+                   help="default: vertido unico | rain: gotas de lluvia sobre esfera invisible")
+    p.add_argument("--obstacle-x", type=float, default=0.5, help="centro horizontal de la esfera")
+    p.add_argument("--obstacle-y", type=float, default=0.45, help="centro vertical de la esfera (0=piso)")
+    p.add_argument("--obstacle-radius", type=float, default=0.18, help="radio de la esfera (fraccion de res)")
+    p.add_argument("--rain-every", type=int, default=4, help="pasos entre lluvias")
+    p.add_argument("--rain-drops", type=int, default=3, help="gotas por lluvia")
+    p.add_argument("--rain-seed", type=int, default=7, help="semilla de la lluvia")
     return p
 
 
@@ -46,6 +54,14 @@ def main(argv=None):
         pour_x=args.pour_x,
         pour_width=args.pour_width,
         pour_speed=args.pour_speed,
+        obstacle="sphere" if args.scene == "rain" else "none",
+        obstacle_x=args.obstacle_x,
+        obstacle_y=args.obstacle_y,
+        obstacle_radius=args.obstacle_radius,
+        rain=args.scene == "rain",
+        rain_every=args.rain_every,
+        rain_drops=args.rain_drops,
+        rain_seed=args.rain_seed,
     )
     backend = create_backend(args.backend, cfg)
     os.makedirs(args.out, exist_ok=True)

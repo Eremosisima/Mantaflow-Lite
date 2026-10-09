@@ -12,6 +12,8 @@ import math
 
 import torch
 
+from ..sim import build_fluid, rain_spots
+
 
 def _bilinear(f, fx, fy):
     """f[j,i] con punto de malla (i,j); interpola en (fx, fy) en unidades de malla."""
@@ -29,32 +31,38 @@ def _bilinear(f, fx, fy):
     return top * (1.0 - ty) + bot * ty
 
 
-def _neighbor_diag(r, device):
-    diag = torch.full((r, r), 4.0, device=device)
-    diag[:, 0] -= 1.0
-    diag[:, -1] -= 1.0
-    diag[0, :] -= 1.0
-    diag[-1, :] -= 1.0
+def _open_pairs(fluid):
+    nl = fluid[:, 1:] * fluid[:, :-1]
+    nu = fluid[1:, :] * fluid[:-1, :]
+    return nl, nu
+
+
+def _diag_from_pairs(nl, nu):
+    diag = torch.zeros((nl.shape[0], nl.shape[1] + 1), dtype=nl.dtype, device=nl.device)
+    diag[:, 1:] += nl
+    diag[:, :-1] += nl
+    diag[1:, :] += nu
+    diag[:-1, :] += nu
     return diag
 
 
-def _spmv(p, diag):
+def _spmv(p, diag, nl, nu):
     ap = diag * p
-    ap[:, 1:] -= p[:, :-1]
-    ap[:, :-1] -= p[:, 1:]
-    ap[1:, :] -= p[:-1, :]
-    ap[:-1, :] -= p[1:, :]
+    ap[:, 1:] -= nl * p[:, :-1]
+    ap[:, :-1] -= nl * p[:, 1:]
+    ap[1:, :] -= nu * p[:-1, :]
+    ap[:-1, :] -= nu * p[1:, :]
     return ap
 
 
-def _jacobi(b, diag, iters, p0=None):
+def _jacobi(b, diag, nl, nu, iters, p0=None):
     p = torch.zeros_like(b) if p0 is None else p0.clone()
     for _ in range(iters):
         ps = torch.zeros_like(p)
-        ps[:, 1:] += p[:, :-1]
-        ps[:, :-1] += p[:, 1:]
-        ps[1:, :] += p[:-1, :]
-        ps[:-1, :] += p[1:, :]
+        ps[:, 1:] += nl * p[:, :-1]
+        ps[:, :-1] += nl * p[:, 1:]
+        ps[1:, :] += nu * p[:-1, :]
+        ps[:-1, :] += nu * p[1:, :]
         p = torch.where(diag > 0.0, (b + ps) / diag.clamp(min=1.0), torch.zeros_like(p))
     return p
 
@@ -78,9 +86,15 @@ class GpuBackend:
         self.u = torch.zeros((r, r + 1), dtype=f32, device=dev)
         self.v = torch.zeros((r + 1, r), dtype=f32, device=dev)
         self.d = torch.zeros((r, r), dtype=f32, device=dev)
-        self._diag_full = _neighbor_diag(r, dev)
-        self._diag_half = _neighbor_diag(r // 2, dev) if cfg.half_res else None
+        f = torch.from_numpy(build_fluid(cfg)).to(device=dev, dtype=f32)
+        self._f = f
+        self._nl, self._nu = _open_pairs(f)
+        self._diag_full = _diag_from_pairs(self._nl, self._nu)
         if cfg.half_res:
+            self._f2 = torch.nn.functional.avg_pool2d(
+                f.unsqueeze(0).unsqueeze(0), 2).squeeze(0).squeeze(0)
+            self._nl2, self._nu2 = _open_pairs(self._f2)
+            self._diag_half = _diag_from_pairs(self._nl2, self._nu2)
             pos = (torch.arange(r, dtype=f32, device=dev) - 0.5) * 0.5
             rc = max(r // 2, 1)
             i0 = torch.floor(pos).long().clamp(0, max(rc - 2, 0))
@@ -88,6 +102,7 @@ class GpuBackend:
             self._up0, self._up1 = i0, (i0 + 1).clamp(max=rc - 1)
         self.iters_used = 0
         self.pre_div = 0.0
+        self.t = 0
 
         # coordenadas de caras para adveccion (se reutilizan cada paso)
         self._ux_x = torch.arange(1, r, dtype=f32, device=dev).unsqueeze(0).expand(r, -1)
@@ -97,18 +112,30 @@ class GpuBackend:
         self._dx_x = (torch.arange(r, dtype=f32, device=dev) + 0.5).unsqueeze(0).expand(r, -1)
         self._dx_y = (torch.arange(r, dtype=f32, device=dev) + 0.5).unsqueeze(1).expand(-1, r)
 
-    def _inject_pour(self):
-        r = self.cfg.res
-        cx = int(self.cfg.pour_x * r)
-        half = self.cfg.pour_width // 2
-        lo, hi = max(0, cx - half), min(r, cx + half + 1)
-        self.d[r - 1, lo:hi] = 1.0
-        self.v[r - 1, lo:hi] = -self.cfg.pour_speed
+    def _inject(self):
+        cfg, r = self.cfg, self.cfg.res
+        half = cfg.pour_width // 2
+        if cfg.rain:
+            for x in rain_spots(cfg, self.t):
+                cx = int(x * r)
+                lo, hi = max(0, cx - half), min(r, cx + half + 1)
+                self.d[r - 1, lo:hi] = 1.0
+                self.v[r - 1, lo:hi] = -cfg.pour_speed
+        else:
+            cx = int(cfg.pour_x * r)
+            lo, hi = max(0, cx - half), min(r, cx + half + 1)
+            self.d[r - 1, lo:hi] = 1.0
+            self.v[r - 1, lo:hi] = -cfg.pour_speed
 
     def _apply_gravity(self, dt):
         g = self.cfg.gravity * dt
         if g > 0.0:
             self.v[1:-1, :] -= g * 0.5 * (self.d[:-1, :] + self.d[1:, :])
+
+    def _enforce_solids(self):
+        self.u[:, 1:-1] *= self._nl
+        self.v[1:-1, :] *= self._nu
+        self.d *= self._f
 
     def _advect(self, dt):
         u, v, d = self.u, self.v, self.d
@@ -147,7 +174,7 @@ class GpuBackend:
         target = cfg.cg_tol * bnorm
         it = 0
         for it in range(1, cfg.cg_max_iter + 1):
-            ap = _spmv(x, self._diag_full)
+            ap = _spmv(x, self._diag_full, self._nl, self._nu)
             denom = torch.sum(x * ap).item()
             if abs(denom) < 1e-30:
                 break
@@ -166,6 +193,7 @@ class GpuBackend:
     def _project(self):
         cfg = self.cfg
         b = -self.divergence()
+        b = b * self._f
         self.pre_div = float(torch.abs(b).max().item())
         if cfg.solver == "cg":
             p, iters = self._cg_solve(b)
@@ -175,24 +203,29 @@ class GpuBackend:
                 b2 = torch.nn.functional.avg_pool2d(
                     b.unsqueeze(0).unsqueeze(0), 2
                 ).squeeze(0).squeeze(0)
-                p2 = _jacobi(b2, self._diag_half, cfg.jacobi_iters)
+                p2 = _jacobi(b2, self._diag_half, self._nl2, self._nu2,
+                              cfg.jacobi_iters)
                 p = _upsample_bilinear(p2, self._up0, self._up1, self._upt)
                 iters += cfg.polish_iters
                 if cfg.polish_iters > 0:
-                    p = _jacobi(b, self._diag_full, cfg.polish_iters, p0=p)
+                    p = _jacobi(b, self._diag_full, self._nl, self._nu,
+                                cfg.polish_iters, p0=p)
             else:
-                p = _jacobi(b, self._diag_full, cfg.jacobi_iters)
+                p = _jacobi(b, self._diag_full, self._nl, self._nu, cfg.jacobi_iters)
         self.iters_used = iters
-        self.u[:, 1:-1] -= p[:, 1:] - p[:, :-1]
-        self.v[1:-1, :] -= p[1:, :] - p[:-1, :]
+        self.u[:, 1:-1] -= self._nl * (p[:, 1:] - p[:, :-1])
+        self.v[1:-1, :] -= self._nu * (p[1:, :] - p[:-1, :])
 
     @torch.no_grad()
     def step(self, dt=None):
         dt = self.cfg.dt if dt is None else dt
-        self._inject_pour()
+        self._inject()
         self._apply_gravity(dt)
+        self._enforce_solids()
         self._advect(dt)
+        self._enforce_solids()
         self._project()
+        self.t += 1
 
     def max_divergence(self):
         return float(torch.abs(self.divergence()).max().item())

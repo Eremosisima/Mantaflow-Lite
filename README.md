@@ -16,6 +16,22 @@ del chorro + splash (pasos 0–320). Frame final a paso 400:*
 
 ![final](media/demo_final.png)
 
+### Escena 2: lluvia sobre una esfera invisible
+
+```bash
+python -m mantaflow_lite --backend gpu --solver cg --scene rain --res 256 --steps 600 --save-every 50
+```
+
+Gotas de líquido fluorescente cayendo sobre una esfera que **no se dibuja**: el
+contorno solo se revela porque el líquido se acumula y desliza sobre su
+superficie. El obstáculo entra en la simulación como máscara de celdas sólidas
+que **enmascara el Laplaciano** (cara cerrada = vecino excluido de la diagonal y
+del spmv), el gradiente (sin corrección a través del sólido) y la densidad
+(0 dentro). La lluvia es determinista (`rain_seed`): los tres backends ven
+exactamente las mismas gotas, así la paridad se mantiene.
+
+![rain](media/rain_sphere.gif)
+
 ## Por qué existe este proyecto
 
 Se analizó [Mantaflow](https://github.com/tum-pbs/mantaflow) (Apache 2.0) como
@@ -67,8 +83,9 @@ pytest tests -q                    # 12 tests
 ```
 
 Flags: `--res` (par), `--steps`, `--dt`, `--gravity`, `--pour-x`, `--pour-width`,
-`--pour-speed`, `--jacobi-iters`, `--polish-iters`, `--no-half-res`, `--cg-tol`,
-`--out`, `--save-every`.
+`--pour-speed`, `--scene default|rain` (escena de lluvia con esfera invisible),
+`--obstacle-x/y/radius`, `--rain-every/drops/seed`, `--jacobi-iters`,
+`--polish-iters`, `--no-half-res`, `--cg-tol`, `--out`, `--save-every`.
 
 ## Rendimiento (medido, no estimado)
 
@@ -103,7 +120,7 @@ El CG converge; el Jacobi fijo no — ese es el trato. En práctica la
 advección semi-Lagrangian amortigua el error residual, y el precio se paga en
 velocidad, no en colapso numérico.
 
-## Tests (12, todos en verde)
+## Tests (16, todos en verde)
 
 ```bash
 pytest tests -q
@@ -116,6 +133,8 @@ pytest tests -q
   medias < 0.03 en bloques de salida — si un backend se desvía del otro, el
   test revienta.
 - **Presupuesto**: `tricks` efectivamente más rápido que `cpu` en escena real.
+- **Escena lluvia+esfera** (por backend): nada de densidad dentro del sólido,
+  líquido llegando al contorno, NaN fuera, y lluvia idéntica entre backends.
 - Render: PNG con la geometría esperada.
 
 ## Límites (sabidos, no escondidos)
@@ -134,7 +153,7 @@ pytest tests -q
 
 ```
 mantaflow_lite/
-  sim.py            # SimConfig + create_backend (fábrica con imports perezosos)
+  sim.py            # SimConfig + create_backend + escenas (build_fluid, rain_spots)
   cli.py, __main__.py
   render.py         # densidad -> magenta fluorescente (PNG/GIF)
   backends/

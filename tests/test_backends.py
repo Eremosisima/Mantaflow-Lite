@@ -9,6 +9,7 @@ import pytest
 
 from mantaflow_lite import SimConfig, create_backend
 from mantaflow_lite.render import save_frame
+from mantaflow_lite.sim import rain_spots
 
 BACKENDS = ["cpu", "tricks", "gpu"]
 
@@ -128,3 +129,36 @@ def test_save_frame(tmp_path):
     assert out.exists()
     im = Image.open(out)
     assert im.size == (128, 128)  # scale=2
+
+
+# ------------------------------------------------------------ escena lluvia
+@pytest.mark.parametrize("name", BACKENDS)
+def test_lluvia_sobre_esfera(name):
+    """Lluvia sobre esfera invisible: nada dentro del solido, liquido en el contorno."""
+    if name == "gpu":
+        _skip_no_cuda()
+    from mantaflow_lite.sim import build_fluid
+    cfg = SimConfig(res=64, steps=90, dt=0.1, obstacle="sphere", rain=True,
+                    obstacle_y=0.5)
+    b = _run(name, cfg)
+    d = b.density()
+    f = build_fluid(cfg)
+    assert np.isfinite(d).all(), f"{name}: NaN en la escena de lluvia"
+    assert d[f == 0].max() == 0.0, f"{name}: densidad dentro de la esfera"
+    # banda a 0-3 celdas de la superficie: el liquido debe estar tocando el contorno
+    r = cfg.res
+    ii, jj = np.meshgrid(np.arange(r) + 0.5, np.arange(r) + 0.5)
+    dist = np.sqrt((ii - cfg.obstacle_x * r) ** 2 + (jj - cfg.obstacle_y * r) ** 2)
+    rad = cfg.obstacle_radius * r
+    shell = (dist >= rad) & (dist < rad + 3.0)
+    assert d[shell].sum() > 0.05, (
+        f"{name}: el liquido no llego al contorno ({d[shell].sum():.4f})")
+
+
+def test_misma_lluvia_todos_backends():
+    """La lluvia es determinista e identica entre backends (paridad)."""
+    cfg = SimConfig(res=64, obstacle="sphere", rain=True, rain_seed=7)
+    spots = [tuple(rain_spots(cfg, s)) for s in range(12)]
+    spots2 = [tuple(rain_spots(cfg, s)) for s in range(12)]
+    assert spots == spots2
+    assert any(spots), "la lluvia nunca gotio"

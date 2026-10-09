@@ -7,6 +7,8 @@ import math
 import numpy as np
 from numba import njit, prange
 
+from ..sim import build_fluid, rain_spots
+
 
 # ---------------------------------------------------------------- muestreo
 @njit(cache=True, inline="always")
@@ -89,22 +91,34 @@ def _advect_d(u, v, d, dt, out):
 
 
 # ---------------------------------------------------------------- laplaciano
-def _neighbor_diag(r):
-    diag = np.full((r, r), 4.0)
-    diag[:, 0] -= 1.0
-    diag[:, -1] -= 1.0
-    diag[0, :] -= 1.0
-    diag[-1, :] -= 1.0
+def _open_pairs(fluid):
+    """Pares de celdas vecinas donde la cara esta ABIERTA (ambas de fluido).
+
+    nl (r, r-1): pares horizontales (i, i+1); nu (r-1, r): pares (j, j+1).
+    Con fluido completo valen 1 y recuperan el laplaciano de Neumann de siempre.
+    """
+    nl = fluid[:, 1:] * fluid[:, :-1]
+    nu = fluid[1:, :] * fluid[:-1, :]
+    return nl, nu
+
+
+def _diag_from_pairs(nl, nu):
+    """Diagonal = numero de vecinos abiertos (paredes y solidos excluidos)."""
+    diag = np.zeros((nl.shape[0], nl.shape[1] + 1), dtype=nl.dtype)
+    diag[:, 1:] += nl
+    diag[:, :-1] += nl
+    diag[1:, :] += nu
+    diag[:-1, :] += nu
     return diag
 
 
-def _spmv(p, diag):
-    """A p = diag*p - suma de vecinos (condiciones de Neumann en paredes)."""
+def _spmv(p, diag, nl, nu):
+    """A p = diag*p - vecinos abiertos (Neumann en paredes y solidos)."""
     ap = diag * p
-    ap[:, 1:] -= p[:, :-1]
-    ap[:, :-1] -= p[:, 1:]
-    ap[1:, :] -= p[:-1, :]
-    ap[:-1, :] -= p[1:, :]
+    ap[:, 1:] -= nl * p[:, :-1]
+    ap[:, :-1] -= nl * p[:, 1:]
+    ap[1:, :] -= nu * p[:-1, :]
+    ap[:-1, :] -= nu * p[1:, :]
     return ap
 
 
@@ -120,23 +134,39 @@ class CpuBackend:
         self._ut = np.zeros_like(self.u)
         self._vt = np.zeros_like(self.v)
         self._dt = np.zeros_like(self.d)
-        self._diag = _neighbor_diag(r)
+        self._f = build_fluid(cfg)
+        self._nl, self._nu = _open_pairs(self._f)
+        self._diag = _diag_from_pairs(self._nl, self._nu)
         self.last_cg_iters = 0
         self.pre_div = 0.0
+        self.t = 0
 
     # -------------------------------------------------------------- pasos
-    def _inject_pour(self):
-        r = self.cfg.res
-        cx = int(self.cfg.pour_x * r)
-        half = self.cfg.pour_width // 2
-        lo, hi = max(0, cx - half), min(r, cx + half + 1)
-        self.d[r - 1, lo:hi] = 1.0
-        self.v[r - 1, lo:hi] = -self.cfg.pour_speed
+    def _inject(self):
+        cfg, r = self.cfg, self.cfg.res
+        half = cfg.pour_width // 2
+        if cfg.rain:
+            for x in rain_spots(cfg, self.t):
+                cx = int(x * r)
+                lo, hi = max(0, cx - half), min(r, cx + half + 1)
+                self.d[r - 1, lo:hi] = 1.0
+                self.v[r - 1, lo:hi] = -cfg.pour_speed
+        else:
+            cx = int(cfg.pour_x * r)
+            lo, hi = max(0, cx - half), min(r, cx + half + 1)
+            self.d[r - 1, lo:hi] = 1.0
+            self.v[r - 1, lo:hi] = -cfg.pour_speed
 
     def _apply_gravity(self, dt):
         g = self.cfg.gravity * dt
         if g > 0.0:
             self.v[1:-1, :] -= g * 0.5 * (self.d[:-1, :] + self.d[1:, :])
+
+    def _enforce_solids(self):
+        """Ceras en caras cerradas y densidad dentro del solido."""
+        self.u[:, 1:-1] *= self._nl
+        self.v[1:-1, :] *= self._nu
+        self.d *= self._f
 
     def _advect(self, dt):
         self._ut[:] = 0.0
@@ -166,7 +196,7 @@ class CpuBackend:
         target = cfg.cg_tol * bnorm
         it = 0
         for it in range(1, cfg.cg_max_iter + 1):
-            ap = _spmv(x, self._diag)
+            ap = _spmv(x, self._diag, self._nl, self._nu)
             denom = float(x.ravel() @ ap.ravel())
             if abs(denom) < 1e-30:
                 break
@@ -184,18 +214,22 @@ class CpuBackend:
 
     def _project(self):
         b = -self.divergence()
+        b *= self._f
         self.pre_div = float(np.abs(b).max())
         p, iters = self._cg_solve(b)
         self.last_cg_iters = iters
-        self.u[:, 1:-1] -= p[:, 1:] - p[:, :-1]
-        self.v[1:-1, :] -= p[1:, :] - p[:-1, :]
+        self.u[:, 1:-1] -= self._nl * (p[:, 1:] - p[:, :-1])
+        self.v[1:-1, :] -= self._nu * (p[1:, :] - p[:-1, :])
 
     def step(self, dt=None):
         dt = self.cfg.dt if dt is None else dt
-        self._inject_pour()
+        self._inject()
         self._apply_gravity(dt)
+        self._enforce_solids()
         self._advect(dt)
+        self._enforce_solids()
         self._project()
+        self.t += 1
 
     def max_divergence(self):
         return float(np.abs(self.divergence()).max())

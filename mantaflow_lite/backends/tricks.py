@@ -2,7 +2,7 @@
 
 Trucos aplicados (trabajo FIJO por frame, estilo motor de juego):
   1. Jacobi de iteraciones fijas en vez de CG hasta converger.
-  2. Presion resuelta a MEDIA RESOLUCION y subida con repeat (barato).
+  2. Presion resuelta a MEDIA RESOLUCION y subida con bilineal (barato).
   3. Pulido con polish_iters iteraciones a resolucion completa (fijo).
   4. Float32 (suficiente para graficos).
 
@@ -12,18 +12,19 @@ Lo unico que cambia respecto a cpu es el solver de presion.
 """
 import numpy as np
 
-from .cpu import _advect_d, _advect_u, _advect_v, _neighbor_diag
+from ..sim import build_fluid, rain_spots
+from .cpu import _advect_d, _advect_u, _advect_v, _diag_from_pairs, _open_pairs
 
 
-def _jacobi(b, diag, iters, p0=None):
-    """Jacobi vectorizado: A·p = b con A = diag - vecinos. p0 = aproximacion inicial."""
+def _jacobi(b, diag, nl, nu, iters, p0=None):
+    """Jacobi vectorizado: A·p = b, A = diag - vecinos abiertos. p0 = estimacion inicial."""
     p = np.zeros_like(b) if p0 is None else p0.copy()
     for _ in range(iters):
         ps = np.zeros_like(p)
-        ps[:, 1:] += p[:, :-1]
-        ps[:, :-1] += p[:, 1:]
-        ps[1:, :] += p[:-1, :]
-        ps[:-1, :] += p[1:, :]
+        ps[:, 1:] += nl * p[:, :-1]
+        ps[:, :-1] += nl * p[:, 1:]
+        ps[1:, :] += nu * p[:-1, :]
+        ps[:-1, :] += nu * p[1:, :]
         p = np.where(diag > 0.0, (b + ps) / np.maximum(diag, 1.0), 0.0)
     return p
 
@@ -55,24 +56,45 @@ class TricksBackend:
         self._ut = np.zeros_like(self.u)
         self._vt = np.zeros_like(self.v)
         self._dt = np.zeros_like(self.d)
-        self._diag_full = _neighbor_diag(r).astype(np.float32)
-        self._diag_half = _neighbor_diag(r // 2).astype(np.float32) if cfg.half_res else None
-        self._up0, self._up1, self._upt = _upsample_pos(r) if cfg.half_res else (None, None, None)
+        self._f = build_fluid(cfg).astype(np.float32)
+        self._nl, self._nu = _open_pairs(self._f)
+        self._diag_full = _diag_from_pairs(self._nl, self._nu)
+        if cfg.half_res:
+            self._f2 = self._f.reshape(r // 2, 2, r // 2, 2).mean(axis=(1, 3))
+            self._nl2, self._nu2 = _open_pairs(self._f2)
+            self._diag_half = _diag_from_pairs(self._nl2, self._nu2)
+            self._up0, self._up1, self._upt = _upsample_pos(r)
+        else:
+            self._f2 = self._nl2 = self._nu2 = self._diag_half = None
+            self._up0 = self._up1 = self._upt = None
         self.iters_used = 0
         self.pre_div = 0.0
+        self.t = 0
 
-    def _inject_pour(self):
-        r = self.cfg.res
-        cx = int(self.cfg.pour_x * r)
-        half = self.cfg.pour_width // 2
-        lo, hi = max(0, cx - half), min(r, cx + half + 1)
-        self.d[r - 1, lo:hi] = 1.0
-        self.v[r - 1, lo:hi] = -self.cfg.pour_speed
+    def _inject(self):
+        cfg, r = self.cfg, self.cfg.res
+        half = cfg.pour_width // 2
+        if cfg.rain:
+            for x in rain_spots(cfg, self.t):
+                cx = int(x * r)
+                lo, hi = max(0, cx - half), min(r, cx + half + 1)
+                self.d[r - 1, lo:hi] = 1.0
+                self.v[r - 1, lo:hi] = -cfg.pour_speed
+        else:
+            cx = int(cfg.pour_x * r)
+            lo, hi = max(0, cx - half), min(r, cx + half + 1)
+            self.d[r - 1, lo:hi] = 1.0
+            self.v[r - 1, lo:hi] = -cfg.pour_speed
 
     def _apply_gravity(self, dt):
         g = self.cfg.gravity * dt
         if g > 0.0:
             self.v[1:-1, :] -= np.float32(g) * 0.5 * (self.d[:-1, :] + self.d[1:, :])
+
+    def _enforce_solids(self):
+        self.u[:, 1:-1] *= self._nl
+        self.v[1:-1, :] *= self._nu
+        self.d *= self._f
 
     def _advect(self, dt):
         self._ut[:] = 0.0
@@ -92,27 +114,33 @@ class TricksBackend:
     def _project(self):
         cfg = self.cfg
         b = -self.divergence()
+        b *= self._f
         self.pre_div = float(np.abs(b).max())
         iters = cfg.jacobi_iters
         if cfg.half_res:
             b2 = b.reshape(cfg.res // 2, 2, cfg.res // 2, 2).mean(axis=(1, 3))
-            p2 = _jacobi(b2.astype(np.float32), self._diag_half, cfg.jacobi_iters)
+            p2 = _jacobi(b2.astype(np.float32), self._diag_half,
+                         self._nl2, self._nu2, cfg.jacobi_iters)
             p = _upsample_bilinear(p2, self._up0, self._up1, self._upt)
             iters += cfg.polish_iters
             if cfg.polish_iters > 0:
-                p = _jacobi(b, self._diag_full, cfg.polish_iters, p0=p)
+                p = _jacobi(b, self._diag_full, self._nl, self._nu,
+                            cfg.polish_iters, p0=p)
         else:
-            p = _jacobi(b, self._diag_full, cfg.jacobi_iters)
+            p = _jacobi(b, self._diag_full, self._nl, self._nu, cfg.jacobi_iters)
         self.iters_used = iters
-        self.u[:, 1:-1] -= p[:, 1:] - p[:, :-1]
-        self.v[1:-1, :] -= p[1:, :] - p[:-1, :]
+        self.u[:, 1:-1] -= self._nl * (p[:, 1:] - p[:, :-1])
+        self.v[1:-1, :] -= self._nu * (p[1:, :] - p[:-1, :])
 
     def step(self, dt=None):
         dt = self.cfg.dt if dt is None else dt
-        self._inject_pour()
+        self._inject()
         self._apply_gravity(dt)
+        self._enforce_solids()
         self._advect(dt)
+        self._enforce_solids()
         self._project()
+        self.t += 1
 
     def max_divergence(self):
         return float(np.abs(self.divergence()).max())
